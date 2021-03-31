@@ -1,0 +1,194 @@
+# Select gene expression predictors of hypomethylation
+
+
+# Get A and B compartment CpGs
+```{r}
+library(GenomicRanges)
+library(rtracklayer)
+library(dplyr)
+library(foreach)
+library(ggplot2)
+library(readr)
+
+# Get CpG locations
+library(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+#data(IlluminaHumanMethylation450kanno.ilmn12.hg19)
+data(Locations)
+cpg_gr <- GRanges(Locations$chr, IRanges(Locations$pos, Locations$pos))
+mcols(cpg_gr)$cg <- rownames(Locations)
+cpg_gr
+    
+# Get CGI and colon A/B compartment annotation
+a <- import("../input/compartment_A.bed")
+b <- import("../input/compartment_B.bed")
+
+cpg_gr$compartment <- NA
+cpg_gr$compartment[countOverlaps(cpg_gr, a)>0] <- "A"
+cpg_gr$compartment[countOverlaps(cpg_gr, b)>0] <- "B"
+table(cpg_gr$compartment)
+
+cgi <- readRDS("../input/cpgIslandExt_hg19.rds")
+left_shore <- flank(cgi, width=2000, start=TRUE, ignore.strand=TRUE)
+right_shore <- flank(cgi, width=2000, start=FALSE, ignore.strand=TRUE)
+cgi_shore <- reduce(c(cgi, left_shore, right_shore))
+cpg_gr$opensea <- ifelse(countOverlaps(cpg_gr, cgi_shore)>0, FALSE, TRUE)
+
+table(cpg_gr$compartment, cpg_gr$opensea)
+
+```
+
+
+# Prepare TCGA clinical, methylation and expression data
+```{r}
+library(UCSCXenaTools)
+
+cohort <- "COAD\\."
+
+# Get Clincal data
+XenaGenerate(subset = XenaHostNames=="tcgaHub") %>% 
+  XenaFilter(filterDatasets = cohort) %>%
+  XenaFilter(filterDatasets = "clinicalMatrix") -> to_get
+XenaQuery(to_get) %>% XenaDownload() -> xe_download
+clin = XenaPrepare(xe_download)
+
+# Get 450k DNAm matrix
+XenaGenerate(subset = XenaHostNames=="tcgaHub") %>% 
+  XenaFilter(filterDatasets = cohort) %>%
+  XenaFilter(filterDatasets = "HumanMethylation450") -> to_get
+XenaQuery(to_get) %>% XenaDownload() -> xe_download
+dnam_df = XenaPrepare(xe_download)
+rn <- dnam_df$sample
+dnam <- dnam_df %>% select(-1) %>% as.matrix()
+rownames(dnam) <- rn
+
+# Get gene expression matrix
+XenaGenerate(subset = XenaHostNames=="tcgaHub") %>% 
+  XenaFilter(filterDatasets = cohort) %>% 
+  XenaFilter(filterDatasets = "HiSeqV2_PANCAN") -> to_get
+XenaQuery(to_get) %>% XenaDownload() -> xe_download
+expr_df <- XenaPrepare(xe_download)
+rn <- expr_df$sample
+expr <- expr_df %>% select(-1) %>% as.matrix()
+rownames(expr) <- rn
+
+```
+
+
+# Estimate A and B compartment open sea methylation
+```{r}
+# a_os = A, Open-Sea
+table(rownames(dnam) %in% cpg_gr$cg)
+a_os_idx <- which(rownames(dnam) %in% cpg_gr$cg[cpg_gr$compartment=="A" & cpg_gr$opensea])
+b_os_idx <- which(rownames(dnam) %in% cpg_gr$cg[cpg_gr$compartment=="B" & cpg_gr$opensea])
+hist(dnam[a_os_idx,1])
+hist(dnam[b_os_idx,1])
+a_os <- colMeans(dnam[a_os_idx,], na.rm=TRUE)
+b_os <- colMeans(dnam[b_os_idx,], na.rm=TRUE)
+
+hypometh <- a_os - b_os
+
+plot(a_os, b_os)
+abline(0, 1, col="red")
+
+plot(a_os, hypometh)
+```
+
+
+```{r}
+keep <- intersect(colnames(expr), names(hypometh))
+expr <- expr[,keep]
+hypometh <- hypometh[keep]
+
+idx <- which(rowVars(expr)>0.1)
+df <- foreach (i = idx, .combine=rbind) %do% {
+  coeff <- coef(summary(lm(hypometh ~ expr[i,])))[2,]
+  data.frame(gene=rownames(expr)[i], estimate=coeff["Estimate"], p=coeff["Pr(>|t|)"])
+}
+
+df %>% ggplot(aes(estimate, -log10(p))) + geom_point() + geom_vline(xintercept = c(-0.04, 0.04), color="red") + geom_hline(yintercept = 10, color="red") + theme_bw()
+```
+
+# Select significantly upregulated with hypomethylation genes
+```{r}
+hypometh_up_genes <- df %>% filter(estimate>0.04 & -log10(p)>10) %>% pull(gene)
+write_tsv(data.frame(symbol=hypometh_up_genes), file="../coad_hypometh_up_genes.txt", col_names=FALSE)
+for (g in hypometh_up_genes[1:10]) {
+  plot(expr[g,], hypometh, main=g)
+}
+
+hypometh_up_score <- colMeans(expr[hypometh_up_genes,])
+summary(lm(hypometh ~ hypometh_up_score))
+plot(hypometh_up_score, hypometh, main="hypometh_up_score")
+```
+
+# Examine hypometh down published genes
+```{r}
+library(readr)
+s5 <- read_tsv("../input/2020_johnstone_reyes_table_s5.txt")
+hypometh_down_b <- s5 %>% filter(Compartment=="B") %>% pull(`Gene symbol`)
+write_tsv(data.frame(symbol=hypometh_down_b), file="../coad_hypometh_down_b_genes.txt", col_names=FALSE)
+df %>% filter(gene %in% hypometh_down_b) %>% ggplot(aes(estimate, -log10(p))) + geom_point()
+
+hypometh_down_score <- colMeans(expr[hypometh_down_b,])
+summary(lm(hypometh ~ hypometh_down_score))
+plot(hypometh_down_score, hypometh, main="coad_hypometh_down_score")
+```
+
+
+```{r}
+plot(hypometh_down_score, hypometh_up_score)
+```
+
+
+# Look correlation between hypomethylation and A/B gene expression difference
+
+```{r}
+library(TxDb.Hsapiens.UCSC.hg19.knownGene)
+library(org.Hs.eg.db)
+entrez_id <- mapIds(org.Hs.eg.db, rownames(expr), "ENTREZID", "SYMBOL")
+symbol <- unlist(mapIds(org.Hs.eg.db, entrez_id,  "SYMBOL", "ENTREZID"))
+
+gene_pos <- select(TxDb.Hsapiens.UCSC.hg19.knownGene, 
+       keys = entrez_id[rownames(expr)], 
+       columns=c("TXNAME", "TXCHROM", "TXSTART"), 
+       keytype="GENEID")
+gene_pos <- gene_pos %>% filter(!is.na(TXCHROM) & !is.na(TXSTART))
+gene_pos$symbol <- symbol[gene_pos$GENEID]
+gene_pos <- gene_pos[!duplicated(gene_pos$symbol),]
+gene_tss_gr <- GRanges(gene_pos$TXCHROM, IRanges(gene_pos$TXSTART, gene_pos$TXSTART))
+mcols(gene_tss_gr) <- gene_pos[, c("GENEID", "symbol")]
+gene_tss_gr$compartment <- NA
+gene_tss_gr$compartment[countOverlaps(gene_tss_gr, a)>0] <- "A"
+gene_tss_gr$compartment[countOverlaps(gene_tss_gr, b)>0] <- "B"
+
+a_idx <- which(rownames(expr) %in% gene_tss_gr$symbol[gene_tss_gr$compartment=="A"])
+b_idx <- which(rownames(expr) %in% gene_tss_gr$symbol[gene_tss_gr$compartment=="B"])
+
+expr_a <- colMeans(expr[a_idx,], na.rm=TRUE)
+expr_b <- colMeans(expr[b_idx,], na.rm=TRUE)
+plot(expr_a, expr_b)
+plot(hypometh, expr_a)
+plot(hypometh, expr_b)
+plot(hypometh, expr_a-expr_b)
+
+write_tsv(data.frame(symbol=rownames(expr)[a_idx]), file="../coad_a_genes.txt", col_names=FALSE)
+write_tsv(data.frame(symbol=rownames(expr)[b_idx]), file="../coad_b_genes.txt", col_names=FALSE)
+
+```
+
+
+# Repeats - no obvious correlation using a handful of putative repeat-associated genes
+```{r}
+library(stringr)
+idx <- str_which(rownames(expr), "^L1")
+rownames(expr)[idx]
+g <- "L1TD1"
+plot(expr[g,], hypometh, main=g)
+
+idx <- str_which(rownames(expr), "ERV")
+rownames(expr)[idx]
+g <- "ERVFRDE1"
+plot(expr[g,], hypometh, main=g)
+```
+
+
