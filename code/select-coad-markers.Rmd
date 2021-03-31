@@ -123,10 +123,8 @@ plot(hypometh_up_score, hypometh, main="hypometh_up_score")
 
 # Examine hypometh down published genes
 ```{r}
-library(readr)
 s5 <- read_tsv("../input/2020_johnstone_reyes_table_s5.txt")
-hypometh_down_b <- s5 %>% filter(Compartment=="B") %>% pull(`Gene symbol`)
-write_tsv(data.frame(symbol=hypometh_down_b), file="../coad_hypometh_down_b_genes.txt", col_names=FALSE)
+hypometh_down_b <- s5 %>% pull(`Gene symbol`)
 df %>% filter(gene %in% hypometh_down_b) %>% ggplot(aes(estimate, -log10(p))) + geom_point()
 
 hypometh_down_score <- colMeans(expr[hypometh_down_b,])
