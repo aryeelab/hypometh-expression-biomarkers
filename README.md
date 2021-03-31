@@ -4,13 +4,13 @@
 
 1. Genes upregulated with hypomethylation:
   
-  coad_hypometh_up_genes.txt
+    coad_hypometh_up_genes.txt
   
 2. Genes downregulated with hypomethylation
 
 This gene set is taken from Johnstone & Reyes 2020 and contains genes that are downregulated with hypomethylation, and includes additional filtering for non-immune infiltrate genes.
 
-  input/2020_johnstone_reyes_table_s5.txt
+    input/2020_johnstone_reyes_table_s5.txt
   
 3. Gene expression ratio of the A vs B compartments
 
